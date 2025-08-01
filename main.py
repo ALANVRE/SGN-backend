@@ -1,3 +1,5 @@
+import os
+import json
 from fastapi import FastAPI, Depends, HTTPException, Header
 from sqlalchemy.orm import Session, declarative_base, relationship, sessionmaker
 from sqlalchemy import create_engine, Column, Integer, String, ForeignKey, Float
@@ -7,49 +9,74 @@ from jose import JWTError, jwt
 from typing import List, Optional
 from fastapi.middleware.cors import CORSMiddleware
 from datetime import datetime, timedelta
-import json
 
-# Configuración DB
-SQLALCHEMY_DATABASE_URL = "postgresql+psycopg2://postgres:12345@localhost:5432/unidad"
-engine = create_engine(SQLALCHEMY_DATABASE_URL)
+# --- Configuración DB ---
+import os
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker, declarative_base
+
+# 🚀 Detectar si hay DATABASE_URL en el entorno (Railway la define automáticamente)
+DATABASE_URL = os.getenv("DATABASE_URL")
+
+if DATABASE_URL:
+    # Railway da postgresql:// y SQLAlchemy necesita postgresql+psycopg2://
+    if DATABASE_URL.startswith("postgresql://"):
+        DATABASE_URL = DATABASE_URL.replace("postgresql://", "postgresql+psycopg2://")
+else:
+    # 🖥️ Si no hay variable, usa la base local (modo desarrollo)
+    DATABASE_URL = "postgresql+psycopg2://postgres:12345678@localhost:5433/unidad"
+
+# 🔗 Crear engine
+engine = create_engine(DATABASE_URL)
+
+# 🔗 Configuración de sesión
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
 Base = declarative_base()
 
-# Modelos
+# ✅ Crear tablas
+try:
+    Base.metadata.create_all(bind=engine)
+except Exception as e:
+    print("❌ Error conectando a la base de datos:", e)
+
+
+# --- Modelos ---
 class Profesor(Base):
     __tablename__ = "profesores"
     id = Column(Integer, primary_key=True, index=True)
-    username = Column(String, unique=True)
-    hashed_password = Column(String)
+    username = Column(String, unique=True, nullable=False)
+    hashed_password = Column(String, nullable=False)
     cursos = relationship("Curso", back_populates="profesor")
 
 class Curso(Base):
     __tablename__ = "cursos"
     id = Column(Integer, primary_key=True, index=True)
-    especialidad = Column(String)
-    curso = Column(String)
-    paralelo = Column(String)
-    materia = Column(String)
-    profesor_id = Column(Integer, ForeignKey("profesores.id"))
+    especialidad = Column(String, nullable=False)
+    curso = Column(String, nullable=False)
+    paralelo = Column(String, nullable=False)
+    materia = Column(String, nullable=False)
+    profesor_id = Column(Integer, ForeignKey("profesores.id"), nullable=False)
     profesor = relationship("Profesor", back_populates="cursos")    
 
 class Nota(Base):
     __tablename__ = "notas"
     id = Column(Integer, primary_key=True, index=True)
-    curso_id = Column(Integer, ForeignKey("cursos.id"))
-    trimestre = Column(String)  # "primero", "segundo", "tercero"
-    nombre_estudiante = Column(String)
-    notas = Column(String)  # JSON string de las 10 notas
-    proyecto = Column(Float)
-    examen = Column(Float)
-    punto_extra = Column(Float)
-    promedio_trimestral = Column(Float)
+    curso_id = Column(Integer, ForeignKey("cursos.id"), nullable=False)
+    trimestre = Column(String, nullable=False)  # "primero", "segundo", "tercero"
+    nombre_estudiante = Column(String, nullable=False)
+    notas = Column(String, nullable=False)  # JSON string de las 10 notas
+    proyecto = Column(Float, default=0)
+    examen = Column(Float, default=0)
+    punto_extra = Column(Float, default=0)
+    promedio_trimestral = Column(Float, nullable=False)
 
     curso = relationship("Curso")
 
+# Crear tablas solo si se usa para desarrollo o pruebas.
+# Para producción, usar Alembic migraciones.
 Base.metadata.create_all(bind=engine)
 
-# Esquemas
+# --- Esquemas ---
 class ProfesorCreate(BaseModel):
     username: str
     password: str
@@ -78,9 +105,9 @@ class CursoOut(BaseModel):
 class NotaEstudiante(BaseModel):
     nombre: str
     notas: List[Optional[float]]
-    proyecto: Optional[float]
-    examen: Optional[float]
-    punto_extra: Optional[float]
+    proyecto: Optional[float] = 0
+    examen: Optional[float] = 0
+    punto_extra: Optional[float] = 0
     promedio_trimestral: float
 
 class NotasRequest(BaseModel):
@@ -88,9 +115,9 @@ class NotasRequest(BaseModel):
     trimestre: str  # "primero", "segundo", "tercero"
     estudiantes: List[NotaEstudiante]
 
-# Seguridad
+# --- Seguridad ---
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
-SECRET_KEY = "supersecretkey"
+SECRET_KEY = os.getenv("SECRET_KEY", "supersecretkey")  # En producción, definir variable de entorno real
 ALGORITHM = "HS256"
 
 def get_password_hash(password):
@@ -105,7 +132,7 @@ def create_access_token(data: dict):
     to_encode.update({"exp": expire})
     return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
 
-# Dependencias
+# --- Dependencias ---
 def get_db():
     db = SessionLocal()
     try:
@@ -134,18 +161,18 @@ def get_current_profesor(authorization: str = Header(...), db: Session = Depends
         raise credentials_exception
     return profesor
 
-# App
+# --- App ---
 app = FastAPI()
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Cambiar si es necesario restringir origenes
+    allow_origins=["*"],  # En producción, restringir orígenes
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Rutas
+# --- Rutas ---
 @app.post("/register", response_model=ProfesorOut)
 def register(profesor: ProfesorCreate, db: Session = Depends(get_db)):
     db_profesor = db.query(Profesor).filter(Profesor.username == profesor.username).first()
@@ -205,19 +232,17 @@ def guardar_notas(
     current_profesor: Profesor = Depends(get_current_profesor),
     db: Session = Depends(get_db)
 ):
-    print("RECIBIDO:", payload)
+    # Evitar imprimir payload completo en producción
     # Validar curso
     curso = db.query(Curso).filter(Curso.id == payload.curso_id, Curso.profesor_id == current_profesor.id).first()
     if not curso:
         raise HTTPException(status_code=404, detail="Curso no encontrado o no autorizado")
 
-    # Eliminar notas previas del mismo curso y trimestre para evitar duplicados
+    # Puedes descomentar esta línea si quieres evitar duplicados
     # db.query(Nota).filter(Nota.curso_id == payload.curso_id, Nota.trimestre == payload.trimestre).delete()
 
-    # Guardar notas
     for est in payload.estudiantes:
         nota_json = json.dumps(est.notas)
-
         nueva_nota = Nota(
             curso_id=payload.curso_id,
             trimestre=payload.trimestre,
@@ -232,7 +257,6 @@ def guardar_notas(
 
     db.commit()
     return {"msg": f"Notas del trimestre {payload.trimestre} guardadas correctamente."}
-
 
 @app.get("/api/promedio-final")
 def calcular_promedio_final(
