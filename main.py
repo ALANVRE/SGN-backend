@@ -11,33 +11,18 @@ from fastapi.middleware.cors import CORSMiddleware
 from datetime import datetime, timedelta
 
 # --- Configuración DB ---
-import os
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker, declarative_base
-
-# 🚀 Detectar si hay DATABASE_URL en el entorno (Railway la define automáticamente)
-import os
-
 DATABASE_URL = os.getenv("DATABASE_URL")
 
 if DATABASE_URL and "railway.internal" in DATABASE_URL:
-    # Reemplazar el esquema para SQLAlchemy
     if DATABASE_URL.startswith("postgresql://"):
         DATABASE_URL = DATABASE_URL.replace("postgresql://", "postgresql+psycopg2://")
 else:
-    # No hay DATABASE_URL o no está en Railway, lanzar error o no conectar
     raise RuntimeError("Esta app está configurada para funcionar solo en Railway.")
 
-from sqlalchemy import create_engine
+# Crear engine y sesión
 engine = create_engine(DATABASE_URL)
-
-
-# ✅ Crear tablas
-try:
-    Base.metadata.create_all(bind=engine)
-except Exception as e:
-    print("❌ Error conectando a la base de datos:", e)
-
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+Base = declarative_base()
 
 # --- Modelos ---
 class Profesor(Base):
@@ -55,25 +40,26 @@ class Curso(Base):
     paralelo = Column(String, nullable=False)
     materia = Column(String, nullable=False)
     profesor_id = Column(Integer, ForeignKey("profesores.id"), nullable=False)
-    profesor = relationship("Profesor", back_populates="cursos")    
+    profesor = relationship("Profesor", back_populates="cursos")
 
 class Nota(Base):
     __tablename__ = "notas"
     id = Column(Integer, primary_key=True, index=True)
     curso_id = Column(Integer, ForeignKey("cursos.id"), nullable=False)
-    trimestre = Column(String, nullable=False)  # "primero", "segundo", "tercero"
+    trimestre = Column(String, nullable=False)
     nombre_estudiante = Column(String, nullable=False)
     notas = Column(String, nullable=False)  # JSON string de las 10 notas
     proyecto = Column(Float, default=0)
     examen = Column(Float, default=0)
     punto_extra = Column(Float, default=0)
     promedio_trimestral = Column(Float, nullable=False)
-
     curso = relationship("Curso")
 
-# Crear tablas solo si se usa para desarrollo o pruebas.
-# Para producción, usar Alembic migraciones.
-Base.metadata.create_all(bind=engine)
+# Crear tablas (una vez en Railway; luego usa migraciones)
+try:
+    Base.metadata.create_all(bind=engine)
+except Exception as e:
+    print("❌ Error conectando a la base de datos:", e)
 
 # --- Esquemas ---
 class ProfesorCreate(BaseModel):
@@ -111,12 +97,12 @@ class NotaEstudiante(BaseModel):
 
 class NotasRequest(BaseModel):
     curso_id: int
-    trimestre: str  # "primero", "segundo", "tercero"
+    trimestre: str
     estudiantes: List[NotaEstudiante]
 
 # --- Seguridad ---
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
-SECRET_KEY = os.getenv("SECRET_KEY", "supersecretkey")  # En producción, definir variable de entorno real
+SECRET_KEY = os.getenv("SECRET_KEY", "supersecretkey")
 ALGORITHM = "HS256"
 
 def get_password_hash(password):
@@ -165,20 +151,25 @@ app = FastAPI()
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # En producción, restringir orígenes
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 # --- Rutas ---
+@app.get("/")
+def read_root():
+    return {"message": "API funcionando en Railway"}
+
 @app.post("/register", response_model=ProfesorOut)
 def register(profesor: ProfesorCreate, db: Session = Depends(get_db)):
-    db_profesor = db.query(Profesor).filter(Profesor.username == profesor.username).first()
-    if db_profesor:
+    if db.query(Profesor).filter(Profesor.username == profesor.username).first():
         raise HTTPException(status_code=400, detail="Usuario ya registrado")
-    hashed_pw = get_password_hash(profesor.password)
-    nuevo = Profesor(username=profesor.username, hashed_password=hashed_pw)
+    nuevo = Profesor(
+        username=profesor.username,
+        hashed_password=get_password_hash(profesor.password)
+    )
     db.add(nuevo)
     db.commit()
     db.refresh(nuevo)
@@ -195,10 +186,6 @@ def login(profesor: ProfesorCreate, db: Session = Depends(get_db)):
         "token_type": "bearer",
         "profesor_id": db_profesor.id
     }
-
-@app.get("/")
-def read_root():
-    return {"message": "API funcionando"}
 
 @app.post("/cursos", response_model=CursoOut)
 def crear_curso(
@@ -231,22 +218,19 @@ def guardar_notas(
     current_profesor: Profesor = Depends(get_current_profesor),
     db: Session = Depends(get_db)
 ):
-    # Evitar imprimir payload completo en producción
-    # Validar curso
-    curso = db.query(Curso).filter(Curso.id == payload.curso_id, Curso.profesor_id == current_profesor.id).first()
+    curso = db.query(Curso).filter(
+        Curso.id == payload.curso_id,
+        Curso.profesor_id == current_profesor.id
+    ).first()
     if not curso:
         raise HTTPException(status_code=404, detail="Curso no encontrado o no autorizado")
 
-    # Puedes descomentar esta línea si quieres evitar duplicados
-    # db.query(Nota).filter(Nota.curso_id == payload.curso_id, Nota.trimestre == payload.trimestre).delete()
-
     for est in payload.estudiantes:
-        nota_json = json.dumps(est.notas)
         nueva_nota = Nota(
             curso_id=payload.curso_id,
             trimestre=payload.trimestre,
             nombre_estudiante=est.nombre,
-            notas=nota_json,
+            notas=json.dumps(est.notas),
             proyecto=est.proyecto or 0,
             examen=est.examen or 0,
             punto_extra=est.punto_extra or 0,
@@ -271,7 +255,6 @@ def calcular_promedio_final(
             Nota.curso_id == curso_id,
             Nota.trimestre == t
         ).all()
-
         for n in notas:
             datos[t][n.nombre_estudiante] = n.promedio_trimestral
 
