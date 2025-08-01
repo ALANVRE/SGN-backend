@@ -11,9 +11,14 @@ from fastapi.middleware.cors import CORSMiddleware
 from datetime import datetime, timedelta
 
 # --- Configuración DB ---
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker, declarative_base
+
+# --- Configuración DB ---
 DATABASE_URL = os.getenv("DATABASE_URL")
 
 if DATABASE_URL and "railway.internal" in DATABASE_URL:
+    # Asegura que SQLAlchemy use el driver correcto para PostgreSQL
     if DATABASE_URL.startswith("postgresql://"):
         DATABASE_URL = DATABASE_URL.replace("postgresql://", "postgresql+psycopg2://")
 else:
@@ -23,6 +28,7 @@ else:
 engine = create_engine(DATABASE_URL)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
+
 
 # --- Modelos ---
 class Profesor(Base):
