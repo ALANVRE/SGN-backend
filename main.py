@@ -16,22 +16,21 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, declarative_base
 
 # 🚀 Detectar si hay DATABASE_URL en el entorno (Railway la define automáticamente)
+import os
+
 DATABASE_URL = os.getenv("DATABASE_URL")
 
-if DATABASE_URL:
-    # Railway da postgresql:// y SQLAlchemy necesita postgresql+psycopg2://
+if DATABASE_URL and "railway.internal" in DATABASE_URL:
+    # Reemplazar el esquema para SQLAlchemy
     if DATABASE_URL.startswith("postgresql://"):
         DATABASE_URL = DATABASE_URL.replace("postgresql://", "postgresql+psycopg2://")
 else:
-    # 🖥️ Si no hay variable, usa la base local (modo desarrollo)
-    DATABASE_URL = "postgresql+psycopg2://postgres:12345678@localhost:5433/unidad"
+    # No hay DATABASE_URL o no está en Railway, lanzar error o no conectar
+    raise RuntimeError("Esta app está configurada para funcionar solo en Railway.")
 
-# 🔗 Crear engine
+from sqlalchemy import create_engine
 engine = create_engine(DATABASE_URL)
 
-# 🔗 Configuración de sesión
-SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
-Base = declarative_base()
 
 # ✅ Crear tablas
 try:
